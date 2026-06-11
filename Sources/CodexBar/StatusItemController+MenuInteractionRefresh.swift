@@ -2,6 +2,11 @@ import AppKit
 import CodexBarCore
 import QuartzCore
 
+struct MenuPopulatePhaseTiming {
+    let label: String
+    let durationMs: Double
+}
+
 extension StatusItemController {
     private static let defaultDeferredMenuInteractionRefreshDelay: Duration = .milliseconds(250)
     private static let slowMenuOperationThreshold: TimeInterval = 0.15
@@ -31,20 +36,66 @@ extension StatusItemController {
         _ operation: String,
         startedAt: CFTimeInterval,
         menu: NSMenu,
-        provider: UsageProvider?)
+        provider: UsageProvider?,
+        phases: [MenuPopulatePhaseTiming]? = nil)
     {
         let elapsed = CACurrentMediaTime() - startedAt
         guard elapsed >= Self.slowMenuOperationThreshold else { return }
-        self.menuLogger.warning(
-            "slow menu operation",
-            metadata: [
-                "operation": operation,
-                "durationMs": String(format: "%.1f", elapsed * 1000),
-                "items": "\(menu.items.count)",
-                "provider": provider?.rawValue ?? "nil",
-                "openMenus": "\(self.openMenus.count)",
-                "storeRefreshing": self.store.isRefreshing ? "1" : "0",
-            ])
+        var metadata: [String: String] = [
+            "operation": operation,
+            "durationMs": String(format: "%.1f", elapsed * 1000),
+            "items": "\(menu.items.count)",
+            "provider": provider?.rawValue ?? "nil",
+            "openMenus": "\(self.openMenus.count)",
+            "storeRefreshing": self.store.isRefreshing ? "1" : "0",
+        ]
+        if let phases, !phases.isEmpty {
+            metadata["phases"] = Self.formatMenuPopulatePhases(phases)
+        }
+        self.menuLogger.warning("slow menu operation", metadata: metadata)
+    }
+
+    /// Worst-first phase breakdown for the slow-operation log line, truncated so a
+    /// card-heavy menu (one entry per card item) cannot flood the unified log.
+    static func formatMenuPopulatePhases(
+        _ phases: [MenuPopulatePhaseTiming],
+        limit: Int = 12) -> String
+    {
+        let sorted = phases.sorted { $0.durationMs > $1.durationMs }
+        let shown = sorted.prefix(limit)
+            .map { "\($0.label)=\(String(format: "%.1f", $0.durationMs))" }
+            .joined(separator: " ")
+        let remainder = sorted.dropFirst(limit)
+        guard !remainder.isEmpty else { return shown }
+        let remainderMs = remainder.reduce(0) { $0 + $1.durationMs }
+        return "\(shown) +\(remainder.count) more=\(String(format: "%.1f", remainderMs))"
+    }
+
+    func beginMenuPopulatePhaseCaptureIfNeeded() -> Bool {
+        guard self.menuPopulatePhaseTimings == nil else { return false }
+        self.menuPopulatePhaseTimings = []
+        return true
+    }
+
+    func finishMenuPopulatePhaseCapture() -> [MenuPopulatePhaseTiming]? {
+        defer { self.menuPopulatePhaseTimings = nil }
+        return self.menuPopulatePhaseTimings
+    }
+
+    func recordMenuPopulatePhase(_ label: String, startedAt: CFTimeInterval) {
+        guard self.menuPopulatePhaseTimings != nil else { return }
+        self.menuPopulatePhaseTimings?
+            .append(MenuPopulatePhaseTiming(
+                label: label,
+                durationMs: (CACurrentMediaTime() - startedAt) * 1000))
+    }
+
+    func recordMenuPopulatePhase<T>(_ label: String, _ work: () -> T) -> T {
+        guard self.menuPopulatePhaseTimings != nil else { return work() }
+        let startedAt = CACurrentMediaTime()
+        let result = work()
+        self.recordMenuPopulatePhase(label, startedAt: startedAt)
+        return result
     }
 
     func logChartRenderDurationIfSlow(_ label: String, startedAt: CFTimeInterval) {

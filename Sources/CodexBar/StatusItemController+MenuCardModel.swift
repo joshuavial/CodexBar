@@ -1,5 +1,6 @@
 import CodexBarCore
 import Foundation
+import QuartzCore
 
 extension StatusItemController {
     func menuCardModel(
@@ -10,6 +11,8 @@ extension StatusItemController {
         accountOverride: AccountInfo? = nil) -> UsageMenuCardView.Model?
     {
         let target = provider ?? self.store.enabledProvidersForDisplay().first ?? .codex
+        let phaseStartedAt = CACurrentMediaTime()
+        defer { self.recordMenuPopulatePhase("cardModel:\(target.rawValue)", startedAt: phaseStartedAt) }
         let metadata = self.store.metadata(for: target)
 
         let usesOverrideCard = forceOverrideCard || snapshotOverride != nil || errorOverride != nil

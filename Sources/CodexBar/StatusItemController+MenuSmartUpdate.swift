@@ -50,13 +50,14 @@ extension StatusItemController {
                     menu.removeItem(at: contentStartIndex)
                 }
                 self.rememberMergedSwitcherState(enabledProviders, context.switcherSelection)
-                if self.addCachedMergedSwitcherContent(
-                    for: context.switcherSelection,
-                    to: menu,
-                    menuWidth: context.menuWidth,
-                    codexAccountDisplay: context.codexAccountDisplay,
-                    tokenAccountDisplay: context.tokenAccountDisplay)
-                {
+                if self.recordMenuPopulatePhase("restoreCached", {
+                    self.addCachedMergedSwitcherContent(
+                        for: context.switcherSelection,
+                        to: menu,
+                        menuWidth: context.menuWidth,
+                        codexAccountDisplay: context.codexAccountDisplay,
+                        tokenAccountDisplay: context.tokenAccountDisplay)
+                }) {
                     return
                 }
                 self.addSwitcherScopedMenuContent(into: menu, captureMenu: menu, context: context)
@@ -84,8 +85,12 @@ extension StatusItemController {
             self.rememberMergedSwitcherState(enabledProviders, context.switcherSelection)
             let scratch = NSMenu()
             scratch.autoenablesItems = false
-            self.addSwitcherScopedMenuContent(into: scratch, captureMenu: menu, context: context)
-            self.reconcileMenuContent(menu, fromIndex: contentStartIndex, shapes: shapes, with: scratch)
+            self.recordMenuPopulatePhase("scratchBuild") {
+                self.addSwitcherScopedMenuContent(into: scratch, captureMenu: menu, context: context)
+            }
+            self.recordMenuPopulatePhase("reconcile") {
+                self.reconcileMenuContent(menu, fromIndex: contentStartIndex, shapes: shapes, with: scratch)
+            }
             self.cacheVisibleMergedSwitcherContent(
                 in: menu,
                 selection: context.switcherSelection,
@@ -123,15 +128,19 @@ extension StatusItemController {
             codexAccountDisplay: context.codexAccountDisplay,
             tokenAccountDisplay: context.tokenAccountDisplay,
             openAIContext: context.openAIContext)
-        self.addPrimaryMenuContent(
-            to: target,
-            context: menuContext,
-            switcherSelection: context.switcherSelection,
-            captureMenu: captureMenu)
-        self.addActionableSections(
-            context.descriptor.sections,
-            to: target,
-            width: context.menuWidth,
-            captureMenu: captureMenu)
+        self.recordMenuPopulatePhase("primaryContent") {
+            self.addPrimaryMenuContent(
+                to: target,
+                context: menuContext,
+                switcherSelection: context.switcherSelection,
+                captureMenu: captureMenu)
+        }
+        self.recordMenuPopulatePhase("sections") {
+            self.addActionableSections(
+                context.descriptor.sections,
+                to: target,
+                width: context.menuWidth,
+                captureMenu: captureMenu)
+        }
     }
 }

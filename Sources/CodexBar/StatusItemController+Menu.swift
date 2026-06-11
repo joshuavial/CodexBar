@@ -203,12 +203,14 @@ extension StatusItemController {
 
     func populateMenu(_ menu: NSMenu, provider: UsageProvider?) {
         let populateStartedAt = CACurrentMediaTime()
+        let capturingPhases = self.beginMenuPopulatePhaseCaptureIfNeeded()
         defer {
             self.logMenuOperationDurationIfSlow(
                 "populateMenu",
                 startedAt: populateStartedAt,
                 menu: menu,
-                provider: provider)
+                provider: provider,
+                phases: capturingPhases ? self.finishMenuPopulatePhaseCapture() : nil)
         }
         defer { self.refreshMenuCardHeights(in: menu) }
 
@@ -238,47 +240,28 @@ extension StatusItemController {
         let openAIContext = self.openAIWebContext(
             currentProvider: currentProvider,
             showAllAccounts: showAllAccounts)
-        let descriptor = self.makeMenuDescriptor(
-            provider: selectedProvider,
-            includeContextualActions: !isOverviewSelected)
-        let menuWidth = self.menuCardWidth(
-            for: enabledProviders,
-            selectedProvider: selectedProvider,
-            descriptor: descriptor)
-
-        let hasTokenSwitcher = menu.items.contains { $0.view is TokenAccountSwitcherView }
-        let hasCodexSwitcher = menu.items.contains { $0.view is CodexAccountSwitcherView }
-        let switcherProvidersMatch = enabledProviders == self.lastSwitcherProviders
-        let switcherUsageBarsShowUsedMatch = self.settings.usageBarsShowUsed == self.lastSwitcherUsageBarsShowUsed
-        let switcherSelectionMatches = switcherSelection == self.lastMergedSwitcherSelection
-        let switcherOverviewAvailabilityMatches = includesOverview == self.lastSwitcherIncludesOverview
-        let menuLocalizationMatches = self.menuLocalizationSignature() == self.lastMenuLocalizationSignature
-        let tokenSwitcherCompatible = tokenAccountDisplay == self.lastTokenAccountMenuDisplay &&
-            ((tokenAccountDisplay?.showSwitcher == true && hasTokenSwitcher) ||
-                (tokenAccountDisplay?.showSwitcher != true && !hasTokenSwitcher))
-        let codexSwitcherCompatible = codexAccountDisplay == self.lastCodexAccountMenuDisplay &&
-            ((codexAccountDisplay?.showSwitcher == true && hasCodexSwitcher) ||
-                (codexAccountDisplay?.showSwitcher != true && !hasCodexSwitcher))
-        let reusableRowWidthsMatch = self.reusableFixedWidthRows(in: menu).allSatisfy { item in
-            guard let view = item.view else { return false }
-            return abs(view.frame.width - menuWidth) <= 0.5
+        let descriptor = self.recordMenuPopulatePhase("descriptor") {
+            self.makeMenuDescriptor(
+                provider: selectedProvider,
+                includeContextualActions: !isOverviewSelected)
         }
-        let providerSwitcherWidthMatches = (menu.items.first?.view as? ProviderSwitcherView).map { view in
-            abs(view.frame.width - menuWidth) <= 0.5
-        } ?? false
-        let canSmartUpdate = self.shouldMergeIcons &&
-            enabledProviders.count > 1 &&
-            !isOverviewSelected &&
-            switcherProvidersMatch &&
-            switcherUsageBarsShowUsedMatch &&
-            switcherSelectionMatches &&
-            switcherOverviewAvailabilityMatches &&
-            menuLocalizationMatches &&
-            tokenSwitcherCompatible &&
-            codexSwitcherCompatible &&
-            reusableRowWidthsMatch &&
-            !menu.items.isEmpty &&
-            menu.items.first?.view is ProviderSwitcherView
+        let menuWidth = self.recordMenuPopulatePhase("width") {
+            self.menuCardWidth(
+                for: enabledProviders,
+                selectedProvider: selectedProvider,
+                descriptor: descriptor)
+        }
+
+        let reusePlan = self.menuPopulateReusePlan(
+            menu: menu,
+            query: MenuPopulateReuseQuery(
+                enabledProviders: enabledProviders,
+                includesOverview: includesOverview,
+                switcherSelection: switcherSelection,
+                isOverviewSelected: isOverviewSelected,
+                menuWidth: menuWidth,
+                codexAccountDisplay: codexAccountDisplay,
+                tokenAccountDisplay: tokenAccountDisplay))
 
         #if DEBUG
         if self.openMenus[ObjectIdentifier(menu)] != nil {
@@ -288,11 +271,11 @@ extension StatusItemController {
                     "available=\(self.store.enabledProviders().map(\.rawValue)) " +
                     "selection=\(String(describing: switcherSelection)) " +
                     "last=\(String(describing: self.lastMergedSwitcherSelection)) " +
-                    "smart=\(canSmartUpdate)")
+                    "smart=\(reusePlan.canSmartUpdate)")
         }
         #endif
 
-        if canSmartUpdate {
+        if reusePlan.canSmartUpdate {
             self.updateMenuContentPreservingSwitcher(
                 menu,
                 context: MenuUpdateContext(
@@ -307,25 +290,15 @@ extension StatusItemController {
             return
         }
 
-        let canPreserveProviderSwitcher = self.shouldMergeIcons &&
-            enabledProviders.count > 1 &&
-            switcherProvidersMatch &&
-            switcherUsageBarsShowUsedMatch &&
-            switcherOverviewAvailabilityMatches &&
-            menuLocalizationMatches &&
-            providerSwitcherWidthMatches &&
-            !menu.items.isEmpty &&
-            menu.items.first?.view is ProviderSwitcherView
-
         #if DEBUG
         if self.openMenus[ObjectIdentifier(menu)] != nil {
             self.menuLogger.debug(
-                "populateMenu(open): preserveSwitcher=\(canPreserveProviderSwitcher) " +
-                    "widthMatch=\(providerSwitcherWidthMatches)")
+                "populateMenu(open): preserveSwitcher=\(reusePlan.canPreserveProviderSwitcher) " +
+                    "widthMatch=\(reusePlan.providerSwitcherWidthMatches)")
         }
         #endif
 
-        if canPreserveProviderSwitcher {
+        if reusePlan.canPreserveProviderSwitcher {
             self.updateMenuContentPreservingSwitcher(
                 menu,
                 context: MenuUpdateContext(
@@ -360,7 +333,7 @@ extension StatusItemController {
                 descriptor: descriptor))
     }
 
-    private func reusableFixedWidthRows(in menu: NSMenu) -> [NSMenuItem] {
+    func reusableFixedWidthRows(in menu: NSMenu) -> [NSMenuItem] {
         guard !menu.items.isEmpty else { return [] }
 
         var reusableRows: [NSMenuItem] = []
@@ -393,12 +366,14 @@ extension StatusItemController {
             defer { self.clearMenuCardViewRecyclePool() }
             menu.removeAllItems()
             let contentSelection = context.switcherSelection ?? .provider(context.currentProvider)
-            self.addProviderSwitcherIfNeeded(
-                to: menu,
-                enabledProviders: context.enabledProviders,
-                includesOverview: context.includesOverview,
-                selection: context.switcherSelection ?? .provider(context.currentProvider),
-                width: context.menuWidth)
+            self.recordMenuPopulatePhase("switcher") {
+                self.addProviderSwitcherIfNeeded(
+                    to: menu,
+                    enabledProviders: context.enabledProviders,
+                    includesOverview: context.includesOverview,
+                    selection: context.switcherSelection ?? .provider(context.currentProvider),
+                    width: context.menuWidth)
+            }
             // Track which providers the switcher was built with for smart update detection
             if self.shouldMergeIcons, context.enabledProviders.count > 1 {
                 self.rememberMergedSwitcherState(
@@ -408,12 +383,14 @@ extension StatusItemController {
             }
             if self.shouldMergeIcons,
                context.enabledProviders.count > 1,
-               self.addCachedMergedSwitcherContent(
-                   for: contentSelection,
-                   to: menu,
-                   menuWidth: context.menuWidth,
-                   codexAccountDisplay: context.codexAccountDisplay,
-                   tokenAccountDisplay: context.tokenAccountDisplay)
+               self.recordMenuPopulatePhase("restoreCached", {
+                   self.addCachedMergedSwitcherContent(
+                       for: contentSelection,
+                       to: menu,
+                       menuWidth: context.menuWidth,
+                       codexAccountDisplay: context.codexAccountDisplay,
+                       tokenAccountDisplay: context.tokenAccountDisplay)
+               })
             {
                 return
             }
@@ -434,17 +411,23 @@ extension StatusItemController {
                 codexAccountDisplay: context.codexAccountDisplay,
                 tokenAccountDisplay: context.tokenAccountDisplay,
                 openAIContext: context.openAIContext)
-            self.addPrimaryMenuContent(
-                to: menu,
-                context: menuContext,
-                switcherSelection: contentSelection)
-            self.addActionableSections(context.descriptor.sections, to: menu, width: context.menuWidth)
-            self.cacheVisibleMergedSwitcherContent(
-                in: menu,
-                selection: contentSelection,
-                contentStartIndex: self.providerSwitcherContentStartIndex(in: menu),
-                menuWidth: context.menuWidth,
-                contentVersion: self.menuContentVersion)
+            self.recordMenuPopulatePhase("primaryContent") {
+                self.addPrimaryMenuContent(
+                    to: menu,
+                    context: menuContext,
+                    switcherSelection: contentSelection)
+            }
+            self.recordMenuPopulatePhase("sections") {
+                self.addActionableSections(context.descriptor.sections, to: menu, width: context.menuWidth)
+            }
+            self.recordMenuPopulatePhase("cacheVisible") {
+                self.cacheVisibleMergedSwitcherContent(
+                    in: menu,
+                    selection: contentSelection,
+                    contentStartIndex: self.providerSwitcherContentStartIndex(in: menu),
+                    menuWidth: context.menuWidth,
+                    contentVersion: self.menuContentVersion)
+            }
         }
     }
 

@@ -41,6 +41,9 @@ extension StatusItemController {
             return item
         }
 
+        let startedAt = CACurrentMediaTime()
+        defer { self.recordMenuPopulatePhase("cardItem:\(id)", startedAt: startedAt) }
+
         let hosting: MenuCardItemHostingView<MenuCardSectionContainerView<CardContent>>
         if let recycled = self.takeRecyclableMenuCardView(
             for: id,
